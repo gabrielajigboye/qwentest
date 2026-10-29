@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marble Blast — Zuma Style Game</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="hud">
+      <div class="hud-left">
+        <span class="badge" id="levelBadge">Level 1</span>
+        <span class="stat">Score: <b id="score">0</b></span>
+        <span class="stat">Combo: <b id="combo">x1</b></span>
+      </div>
+      <div class="hud-right">
+        <span class="stat lives">Lives: <b id="lives">&#9829;&#9829;&#9829;</b></span>
+        <button id="pauseBtn" class="btn small" title="Pause (P)">Pause</button>
+        <button id="restartBtn" class="btn small" title="Restart (R)">Restart</button>
+      </div>
+    </header>
+
+    <div id="gameWrap">
+      <canvas id="game" width="960" height="640"></canvas>
+
+      <div id="overlay" class="overlay">
+        <div class="panel">
+          <h1 id="ovTitle">MARBLE BLAST</h1>
+          <p id="ovText">A Zuma-style shooter. Move the frog with your mouse, click to fire marbles. Match 3+ same-colored marbles to destroy them before they reach the skull!</p>
+          <div class="keys">
+            <div><kbd>Mouse</kbd> Aim &amp; Fire</div>
+            <div><kbd>Space</kbd> Swap loaded marble</div>
+            <div><kbd>A / D</kbd> or <kbd>&#8592; &#8594;</kbd> Rotate</div>
+            <div><kbd>P</kbd> Pause &nbsp; <kbd>R</kbd> Restart</div>
+          </div>
+          <button id="startBtn" class="btn big">Start Game</button>
+        </div>
+      </div>
+    </div>
+
+    <footer id="helpBar">
+      Match 3+ marbles of the same color. Chain matches for combo points. Drop a marble into the chain to push it back!
+    </footer>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
