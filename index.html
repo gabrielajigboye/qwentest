@@ -16,6 +16,8 @@
       </div>
       <div class="hud-right">
         <span class="stat lives">Lives: <b id="lives">&#9829;&#9829;&#9829;</b></span>
+        <span class="stat" id="best">Best: 0</span>
+        <button id="muteBtn" class="btn small" title="Mute (M)">🔊 Sound</button>
         <button id="pauseBtn" class="btn small" title="Pause (P)">Pause</button>
         <button id="restartBtn" class="btn small" title="Restart (R)">Restart</button>
       </div>
@@ -27,12 +29,12 @@
       <div id="overlay" class="overlay">
         <div class="panel">
           <h1 id="ovTitle">MARBLE BLAST</h1>
-          <p id="ovText">A Zuma-style shooter. Move the frog with your mouse, click to fire marbles. Match 3+ same-colored marbles to destroy them before they reach the skull!</p>
+          <p id="ovText">A Zuma-style shooter. Move the frog with your mouse, click to fire marbles. Match 3+ same-colored marbles to destroy them before they reach the skull! Shoot glowing power orbs for REVERSE, TIME FREEZE, SNAKE EYES and gold bonuses.</p>
           <div class="keys">
-            <div><kbd>Mouse</kbd> Aim &amp; Fire</div>
-            <div><kbd>Space</kbd> Swap loaded marble</div>
+            <div><kbd>Mouse</kbd> Aim &middot; hold to auto-fire</div>
+            <div><kbd>Space</kbd> / <kbd>RMB</kbd> Swap loaded marble</div>
             <div><kbd>A / D</kbd> or <kbd>&#8592; &#8594;</kbd> Rotate</div>
-            <div><kbd>P</kbd> Pause &nbsp; <kbd>R</kbd> Restart</div>
+            <div><kbd>P</kbd> Pause &nbsp; <kbd>R</kbd> Restart &nbsp; <kbd>M</kbd> Mute</div>
           </div>
           <button id="startBtn" class="btn big">Start Game</button>
         </div>

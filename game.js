@@ -32,6 +32,14 @@ var COLORS = [
   { name: "purple", fill: "#b04dff", dark: "#6a1fb3" },
 ];
 
+// Power-up kinds (drawn as glowing orbs inside the chain, like Zuma)
+var PKINDS = [
+  { id: "reverse", icon: "◀", ring: "#5cd6ff", glow: "rgba(92,214,255,.7)" },
+  { id: "pause",   icon: "❚❚", ring: "#ffd23d", glow: "rgba(255,210,61,.7)" },
+  { id: "accuracy",icon: "✛", ring: "#ff8ae0", glow: "rgba(255,138,224,.7)" },
+  { id: "gold",    icon: "★", ring: "#ffe9a3", glow: "rgba(255,233,163,.8)" },
+];
+
 // ---------- Path (precomputed polyline with arc-length lookup) ----------
 var pathPts = [];     // dense points [{x,y}]
 var pathCum = [];     // cumulative lengths
@@ -92,13 +100,18 @@ var game = {
   score: 0,
   lives: 3,
   combo: 1,
-  chain: [],           // array of marbles {color}, index 0 = FRONT (closest to pit)
+  chain: [],           // array of marbles {color} or {power}, index 0 = FRONT (closest to pit)
   frontDist: 0,        // arc-length of the head marble's tip start (distance traveled)
   spawnQueue: 0,       // marbles left to feed in
   speed: 42,           // chain forward speed px/s
   reverseTimer: 0,     // time remaining pushing chain backward
+  freezeTimer: 0,      // power-up: chain fully stopped
+  aimAssist: 0,        // power-up: remaining seconds of auto-aim
+  shotsFired: 0,
+  shotsHit: 0,
   projectiles: [],     // flying marbles
   particles: [],
+  floaters: [],        // floating score/power text
   shake: 0,
   loaded: 0,
   next: 0,
@@ -107,6 +120,8 @@ var game = {
 };
 
 // ---------- Level setup ----------
+var timeScale = 1; // slow-motion factor (used for end-of-level cinematic)
+
 function startLevel(lvl) {
   game.level = lvl;
   buildPath(lvl);
@@ -115,9 +130,15 @@ function startLevel(lvl) {
   game.spawnQueue = 26 + lvl * 8;
   game.speed = 40 + lvl * 9;
   game.reverseTimer = 0;
+  game.freezeTimer = 0;
+  game.aimAssist = 0;
+  game.shotsFired = 0;
+  game.shotsHit = 0;
   game.projectiles = [];
   game.particles = [];
+  game.floaters = [];
   game.combo = 1;
+  timeScale = 1;
   game.state = "playing";
   levelEl.textContent = "Level " + lvl;
   hideOverlay();
@@ -135,20 +156,30 @@ function newGame() {
 // Marble i center sits at arc length headDist - i*STEP. Marbles trail the head.
 var headDist = 0; // distance of head marble along path (starts at entrance)
 
+function makePowerMarble() {
+  return { power: PKINDS[Math.floor(Math.random() * PKINDS.length)].id };
+}
+
 function updateChain(dt) {
   // Feed marbles in from the start of the path (tail extends backward off-path)
   if (game.spawnQueue > 0) {
     const tailS = headDist - game.chain.length * STEP; // slot for next marble
     if (tailS >= -STEP * 0.5) {
-      game.chain.push({ color: randColor() });
+      // ~7% chance a spawned marble is a power-up orb (not on level 1)
+      game.chain.push((game.level > 1 && Math.random() < 0.07) ? makePowerMarble() : { color: randColor() });
       game.spawnQueue--;
     }
   }
 
+  // Slow-motion finish when only a few marbles remain (Zuma-style finale)
+  const remaining = game.chain.filter(m => !m.power).length + game.spawnQueue;
+  timeScale = (remaining <= 5 && remaining > 0) ? 0.45 : 1;
+
   let dir = 1;
   if (game.reverseTimer > 0) { game.reverseTimer -= dt; dir = -1; }
+  if (game.freezeTimer > 0) { game.freezeTimer -= dt; dir = 0; }
 
-  headDist += game.speed * dir * dt;
+  headDist += game.speed * dir * timeScale * dt;
   if (headDist < 0) headDist = 0; // don't pull the head before the entrance
 
   // Reached the pit?
@@ -157,28 +188,58 @@ function updateChain(dt) {
     return;
   }
 
-  // Level cleared?
+  // Level cleared? Power orbs that reach the pit are harmless — auto-remove them.
+  const head = game.chain[0];
+  if (head && head.power && headDist >= pathTotal - MARBLE_R * 2.2) {
+    game.chain.shift();
+  }
   if (game.chain.length === 0 && game.spawnQueue === 0 && game.projectiles.length === 0) {
     levelComplete();
   }
 }
 
 function chainPositions() {
-  // returns [{x,y,color,i}] for drawing & collision
+  // returns [{x,y,color,power,i,s}] for drawing & collision
   const out = [];
   for (let i = 0; i < game.chain.length; i++) {
     const s = headDist - i * STEP;
     if (s < -MARBLE_R) break; // still off-screen waiting to enter
     const p = pointAt(Math.max(0, s));
-    out.push({ x: p.x, y: p.y, color: game.chain[i].color, i, s });
+    out.push({ x: p.x, y: p.y, color: game.chain[i].color, power: game.chain[i].power, i, s });
   }
   return out;
+}
+
+// ---------- Power-ups ----------
+function applyPower(id, x, y) {
+  const k = PKINDS.find(p => p.id === id) || { ring: "#fff" };
+  let label = "";
+  if (id === "reverse") { game.reverseTimer = Math.max(game.reverseTimer, 2.5); label = "REVERSE!"; }
+  if (id === "pause")   { game.freezeTimer = Math.max(game.freezeTimer, 3);     label = "TIME FREEZE!"; }
+  if (id === "accuracy"){ game.aimAssist = 8;                                   label = "SNAKE EYES!"; }
+  if (id === "gold")    { game.score += 250 * game.level;                       label = "+" + (250 * game.level); }
+  floater(x, y, label, k.ring);
+  burst(x, y, k.ring, 18);
+  updateHUD();
+}
+
+// Find the nearest chain marble that is NOT a power orb (for auto-aim).
+function nearestChainTarget(mx, my) {
+  let best = null, bd = Infinity;
+  for (const m of chainPositions()) {
+    if (m.power) continue;
+    const d = Math.hypot(mx - m.x, my - m.y);
+    if (d < bd) { bd = d; best = m; }
+  }
+  return best ? { x: best.x, y: best.y, dist: bd } : null;
 }
 
 // ---------- Matching ----------
 function tryMatch(index) {
   if (index < 0 || index >= game.chain.length) return false;
-  const c = game.chain[index].color;
+  const m0 = game.chain[index];
+  if (!m0 || m0.power !== undefined) return false; // power orbs never match
+  const c = m0.color;
   // expand run
   let lo = index, hi = index; // hi = larger index = further from head
   while (lo > 0 && game.chain[lo - 1].color === c) lo--;
@@ -193,6 +254,7 @@ function tryMatch(index) {
   const n = removed.length;
   game.score += n * 10 * game.combo * game.level;
   game.combo++;
+  floaterFromIndex(lo, "+" + (n * 10 * (game.combo - 1) * game.level));
   // Particles at each removed marble position
   for (let k = 0; k < n; k++) {
     const s = headDist - (lo + k) * STEP;
@@ -200,9 +262,12 @@ function tryMatch(index) {
     burst(p.x, p.y, COLORS[c].fill);
   }
   game.shake = Math.min(8, 3 + n);
+  matchSound(n);
 
-  // Chain reaction: if the seam now touches same-colored marbles, match again
-  if (lo > 0 && lo < game.chain.length && game.chain[lo - 1].color === game.chain[lo].color) {
+  // Chain reaction: if the seam now touches same-colored marbles, match again.
+  // A power orb sitting in the gap blocks the seam from closing (like Zuma).
+  if (lo > 0 && lo < game.chain.length && !game.chain[lo - 1].power && !game.chain[lo].power &&
+      game.chain[lo - 1].color === game.chain[lo].color) {
     // possible new run at seam
     const seamIdx = lo - 1;
     const cc = game.chain[seamIdx].color;
@@ -224,7 +289,17 @@ var GUN = { x: W / 2, y: H - 60, angle: -Math.PI / 2 };
 
 function shoot() {
   if (game.cooldown > 0 || game.state !== "playing") return;
+  // Snake Eyes assist: snap to nearest chain marble when reasonably close to it
+  if (game.aimAssist > 0) {
+    const t = nearestChainTarget(mouse.x, mouse.y);
+    if (t && t.dist < 140) {
+      const want = clampAngle(Math.atan2(t.y - GUN.y, t.x - GUN.x));
+      GUN.angle = lerpAngle(GUN.angle, want, 0.85);
+    }
+  }
   game.cooldown = 0.18;
+  game.shotsFired++;
+  sfx("shoot");
   const vx = Math.cos(GUN.angle) * SHOOT_SPEED;
   const vy = Math.sin(GUN.angle) * SHOOT_SPEED;
   game.projectiles.push({
@@ -254,7 +329,16 @@ function updateProjectiles(dt) {
     for (const m of pos) {
       const d = Math.hypot(pr.x - m.x, pr.y - m.y);
       if (d < MARBLE_R * 2 - 4) {
-        insertMarble(m.i, pr);
+        game.shotsHit++;
+        if (m.power) {
+          // Pop the power orb directly
+          game.chain.splice(m.i, 1);
+          applyPower(m.power, m.x, m.y);
+          sfx("power");
+        } else {
+          insertMarble(m.i, pr);
+          sfx("clack");
+        }
         hit = true;
         break;
       }
@@ -287,10 +371,13 @@ function insertMarble(hitIndex, pr) {
 }
 
 // ---------- Lives / levels ----------
+var lastAccuracy = 0;
+
 function loseLife() {
   game.lives--;
   updateHUD();
   game.shake = 14;
+  sfx("lose");
   if (game.lives <= 0) {
     gameOver(false);
   } else {
@@ -300,17 +387,25 @@ function loseLife() {
     game.spawnQueue = Math.max(10, Math.floor(game.spawnQueue * 0.6) + 12);
     headDist = 0;
     game.combo = 1;
+    game.freezeTimer = 0;
+    game.reverseTimer = 0;
     updateHUD();
   }
 }
 
 function levelComplete() {
-  game.score += 500 * game.level;
+  const bonus = 500 * game.level;
+  game.score += bonus;
+  lastAccuracy = game.shotsFired ? Math.round(100 * game.shotsHit / game.shotsFired) : 0;
   updateHUD();
+  saveBest();
+  sfx("win");
   if (game.level >= 8) {
     gameOver(true);
   } else {
-    showOverlay("LEVEL " + game.level + " CLEAR!", "Nice shooting! Get ready for Level " + (game.level + 1) + ".", "Next Level", () => startLevel(game.level + 1));
+    showOverlay("LEVEL " + game.level + " CLEAR!",
+      "Accuracy: " + lastAccuracy + "% · Level bonus +" + bonus + ". Get ready for Level " + (game.level + 1) + ".",
+      "Next Level", () => startLevel(game.level + 1));
     game.state = "levelclear";
   }
 }
@@ -326,10 +421,24 @@ function gameOver(won) {
 }
 
 // ---------- HUD / Overlay ----------
+var bestEl = document.getElementById("best");
+
+function loadBest() {
+  try { return parseInt(localStorage.getItem("marbleBlastBest") || "0", 10) || 0; }
+  catch (e) { return 0; }
+}
+function saveBest() {
+  try {
+    if (game.score > loadBest()) localStorage.setItem("marbleBlastBest", String(game.score));
+    if (bestEl) bestEl.textContent = "Best: " + loadBest();
+  } catch (e) { /* storage unavailable */ }
+}
+
 function updateHUD() {
   scoreEl.textContent = game.score;
   comboEl.textContent = "x" + game.combo;
   livesEl.textContent = "♥".repeat(Math.max(0, game.lives));
+  if (bestEl) bestEl.textContent = "Best: " + Math.max(loadBest(), game.score);
 }
 
 var overlayAction = null;
@@ -347,7 +456,7 @@ startBtn.addEventListener("click", () => {
   if (fn) fn();
 });
 
-// ---------- Particles ----------
+// ---------- Particles / Floaters ----------
 function burst(x, y, color, count = 14) {
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
@@ -356,7 +465,7 @@ function burst(x, y, color, count = 14) {
   }
 }
 function burstAllChain() {
-  for (const m of chainPositions()) burst(m.x, m.y, COLORS[m.color].fill, 6);
+  for (const m of chainPositions()) burst(m.x, m.y, m.power ? "#ffe9a3" : COLORS[m.color].fill, 6);
 }
 function updateParticles(dt) {
   for (let i = game.particles.length - 1; i >= 0; i--) {
@@ -366,14 +475,79 @@ function updateParticles(dt) {
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vx *= 0.96; p.vy *= 0.96;
   }
+  for (let i = game.floaters.length - 1; i >= 0; i--) {
+    const f = game.floaters[i];
+    f.life -= dt;
+    f.y -= 34 * dt;
+    if (f.life <= 0) game.floaters.splice(i, 1);
+  }
+}
+function floater(x, y, text, color = "#ffd166") {
+  if (!text) return;
+  game.floaters.push({ x, y, text, color, life: 1.1 });
+}
+function floaterFromIndex(idx, text) {
+  const s = headDist - idx * STEP;
+  if (s < 0 || s > pathTotal) return;
+  const p = pointAt(s);
+  floater(p.x, p.y - 20, text);
+}
+
+// ---------- Audio (WebAudio synth — no asset files needed) ----------
+var actx = null, muted = false;
+function ensureAudio() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(freq, dur, type, vol, slideTo) {
+  if (!actx || muted) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, actx.currentTime);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), actx.currentTime + dur);
+  g.gain.setValueAtTime(vol || 0.08, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+  o.connect(g).connect(actx.destination);
+  o.start(); o.stop(actx.currentTime + dur);
+}
+function sfx(kind) {
+  if (!actx || muted) return;
+  switch (kind) {
+    case "shoot":  tone(520, 0.08, "square", 0.05, 240); break;
+    case "clack":  tone(180, 0.06, "triangle", 0.09, 120); break;
+    case "match":  tone(660, 0.12, "sine", 0.1, 990); break;
+    case "power":  tone(440, 0.25, "sawtooth", 0.06, 1320); break;
+    case "lose":   tone(200, 0.5, "sawtooth", 0.1, 55); break;
+    case "win":    tone(523, 0.12, "sine", 0.09, 784); setTimeout(() => tone(784, 0.18, "sine", 0.09, 1046), 120); break;
+  }
+}
+function matchSound(runLen) {
+  // rising pitch with combo length
+  tone(500 + runLen * 90, 0.12, "sine", 0.1, 900 + runLen * 120);
+}
+
+// ---------- Angle helpers ----------
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
 }
 
 // ---------- Input ----------
 var keys = {};
+var mouse = { x: W / 2, y: H / 4 };   // last cursor position (canvas coords)
+var firing = false;                     // hold left button for auto-fire
+var lastMouseAim = -Infinity;           // timestamp of last mouse aim (for key/mouse priority)
+
 window.addEventListener("keydown", e => {
   keys[e.key.toLowerCase()] = true;
+  ensureAudio();
   if (e.key === " ") { e.preventDefault(); swapMarbles(); }
   if (e.key.toLowerCase() === "p") togglePause();
+  if (e.key.toLowerCase() === "m") toggleMute();
   if (e.key.toLowerCase() === "r") { if (game.state !== "menu") newGame(); }
 });
 window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
@@ -381,33 +555,42 @@ window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
 function swapMarbles() {
   if (game.state !== "playing") return;
   const t = game.loaded; game.loaded = game.next; game.next = t;
+  tone(300, 0.05, "triangle", 0.05, 420);
 }
 
 // Mouse controls the SHOOTER (like Zuma): frog stays at bottom center,
-// the gun turret rotates to point at the cursor. Click fires.
+// the gun turret rotates to point at the cursor. Click (or hold) fires.
+
+function updateMouse(e) {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (W / r.width);
+  mouse.y = (e.clientY - r.top) * (H / r.height);
+}
 
 canvas.addEventListener("mousemove", e => {
-  const r = canvas.getBoundingClientRect();
-  const mx = (e.clientX - r.left) * (W / r.width);
-  const my = (e.clientY - r.top) * (H / r.height);
-  const dx = mx - GUN.x, dy = my - GUN.y;
+  updateMouse(e);
+  const dx = mouse.x - GUN.x, dy = mouse.y - GUN.y;
   if (Math.hypot(dx, dy) > 8) {
     GUN.angle = clampAngle(Math.atan2(dy, dx));
+    lastMouseAim = performance.now();
   }
 });
 
 canvas.addEventListener("mousedown", e => {
-  if (e.button === 0) shoot();
+  ensureAudio();
+  if (e.button === 0) { firing = true; shoot(); }
   if (e.button === 2) swapMarbles();
 });
+window.addEventListener("mouseup", e => { if (e.button === 0) firing = false; });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 
-// Keyboard aiming support (rotate turret)
+// Keyboard aiming support (rotate turret). Only steers while the mouse has
+// been idle, so the two input methods never fight over the turret angle.
 function keyboardAim(dt) {
   let rot = 0;
   if (keys["a"] || keys["arrowleft"]) rot -= 2.6 * dt;
   if (keys["d"] || keys["arrowright"]) rot += 2.6 * dt;
-  if (rot) {
+  if (rot && performance.now() - lastMouseAim > 400) {
     GUN.angle = clampAngle(GUN.angle + rot);
   }
 }
@@ -437,6 +620,18 @@ function togglePause() {
 }
 pauseBtn.addEventListener("click", togglePause);
 restartBtn.addEventListener("click", () => { if (game.state !== "menu") newGame(); });
+
+var muteBtn = document.getElementById("muteBtn");
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem("marbleBlastMuted", muted ? "1" : "0"); } catch (e) {}
+  if (muteBtn) muteBtn.textContent = muted ? "🔇 Muted" : "🔊 Sound";
+}
+if (muteBtn) {
+  try { muted = localStorage.getItem("marbleBlastMuted") === "1"; } catch (e) {}
+  muteBtn.textContent = muted ? "🔇 Muted" : "🔊 Sound";
+  muteBtn.addEventListener("click", () => { ensureAudio(); toggleMute(); });
+}
 
 // ---------- Rendering ----------
 function drawBackground() {
@@ -510,7 +705,57 @@ function drawMarble(x, y, colorIdx, r = MARBLE_R) {
 }
 
 function drawChain() {
-  for (const m of chainPositions()) drawMarble(m.x, m.y, m.color);
+  for (const m of chainPositions()) {
+    if (m.power) drawPowerOrb(m.x, m.y, m.power);
+    else drawMarble(m.x, m.y, m.color);
+  }
+}
+
+function drawPowerOrb(x, y, id) {
+  const k = PKINDS.find(p => p.id === id) || PKINDS[0];
+  const t = performance.now() / 1000;
+  const pulse = 1 + Math.sin(t * 5) * 0.12;
+  // glow halo
+  const g = ctx.createRadialGradient(x, y, 2, x, y, MARBLE_R * 1.9 * pulse);
+  g.addColorStop(0, k.glow);
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, MARBLE_R * 1.9 * pulse, 0, Math.PI * 2); ctx.fill();
+  // dark core with colored ring
+  ctx.fillStyle = "#10161f";
+  ctx.beginPath(); ctx.arc(x, y, MARBLE_R * 0.92, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = k.ring;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(x, y, MARBLE_R * 0.92, 0, Math.PI * 2); ctx.stroke();
+  // icon
+  ctx.fillStyle = k.ring;
+  ctx.font = "bold 14px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(k.icon, x, y + 1);
+}
+
+// Aim guide: dashed line from frog toward cursor (+ reticle on target marble)
+function drawAimGuide() {
+  if (game.state !== "playing") return;
+  const len = game.aimAssist > 0 ? 520 : 300;
+  ctx.save();
+  ctx.setLineDash([6, 10]);
+  ctx.strokeStyle = game.aimAssist > 0 ? "rgba(255,138,224,.5)" : "rgba(255,255,255,.22)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(GUN.x + Math.cos(GUN.angle) * 36, GUN.y + Math.sin(GUN.angle) * 36);
+  ctx.lineTo(GUN.x + Math.cos(GUN.angle) * len, GUN.y + Math.sin(GUN.angle) * len);
+  ctx.stroke();
+  ctx.restore();
+  if (game.aimAssist > 0) {
+    const t = nearestChainTarget(mouse.x, mouse.y);
+    if (t && t.dist < 140) {
+      ctx.strokeStyle = "rgba(255,138,224,.8)";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(t.x, t.y, MARBLE_R + 5, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
 }
 
 function drawProjectiles() {
@@ -592,6 +837,46 @@ function drawProgress() {
   ctx.fillText("DANGER", bx - 8, by + 8);
 }
 
+// Active power-up badges near the shooter
+function drawPowerTimers() {
+  const items = [];
+  if (game.reverseTimer > 0) items.push(["REVERSE", PKINDS[0].ring, game.reverseTimer]);
+  if (game.freezeTimer > 0) items.push(["FREEZE", PKINDS[1].ring, game.freezeTimer]);
+  if (game.aimAssist > 0)   items.push(["SNAKE EYES", PKINDS[2].ring, game.aimAssist]);
+  let x = GUN.x - 170;
+  const y = GUN.y + 44;
+  for (const [label, color, t] of items) {
+    ctx.fillStyle = "rgba(10,15,20,.75)";
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    const w = 92, h = 20;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x, y, w, h, 6) : ctx.rect(x, y, w, h);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = "bold 10px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(label, x + 6, y + 13);
+    // countdown bar
+    ctx.fillStyle = "rgba(255,255,255,.25)";
+    ctx.fillRect(x + 6, y + 16, w - 12, 2);
+    ctx.fillStyle = color;
+    ctx.fillRect(x + 6, y + 16, (w - 12) * Math.min(1, t / 3), 2);
+    x += w + 8;
+  }
+}
+
+function drawFloaters() {
+  for (const f of game.floaters) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, f.life));
+    ctx.fillStyle = f.color;
+    ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function render() {
   ctx.save();
   if (game.shake > 0) {
@@ -600,11 +885,26 @@ function render() {
   drawBackground();
   if (pathPts.length) {
     drawPath();
+    drawAimGuide();
     drawChain();
     drawProjectiles();
     drawFrog();
     drawParticles();
+    drawFloaters();
+    drawPowerTimers();
     drawProgress();
+    if (timeScale < 1 && game.state === "playing") {
+      // slow-mo vignette
+      const g = ctx.createRadialGradient(W/2, H/2, H*0.35, W/2, H/2, H*0.85);
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(1, "rgba(120,60,200,0.18)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "rgba(255,209,102,.85)";
+      ctx.font = "bold 22px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("FINAL MARBLES…", W/2, 40);
+    }
   }
   ctx.restore();
 }
@@ -617,7 +917,9 @@ function loop(ts) {
 
   if (game.state === "playing") {
     game.cooldown -= dt;
+    if (game.aimAssist > 0) game.aimAssist -= dt;
     keyboardAim(dt);
+    if (firing) shoot();            // hold-to-fire (cooldown-limited)
     updateChain(dt);
     updateProjectiles(dt);
     updateParticles(dt);
@@ -636,4 +938,5 @@ requestAnimationFrame(loop);
 // ---------- Debug/test API (also useful in the browser console) ----------
 window.__GAME__ = { game, get headDist(){ return headDist; }, set headDist(v){ headDist = v; },
   pathTotalGet(){ return pathTotal; }, newGame, startLevel, updateChain, updateProjectiles,
-  updateParticles, tryMatch, shoot, GUN, insertMarble, chainPositions };
+  updateParticles, tryMatch, shoot, GUN, insertMarble, chainPositions, applyPower,
+  nearestChainTarget, mouse, PKINDS };
